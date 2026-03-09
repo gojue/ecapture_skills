@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # Strip leading 'v' for display
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes from CHANGELOG
+        id: changelog
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Try to extract the section for this version from CHANGELOG.md (if it exists)
+          if [ -f "CHANGELOG.md" ]; then
+            # Extract content between this version heading and the next
+            NOTES=$(awk "/^## \[?${VERSION}\]?|^## ${TAG}/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          fi
+
+          # Fallback: use a default message
+          if [ -z "$NOTES" ]; then
+            NOTES="Released \`${TAG}\` of the eCapture Claude AI Skill.\n\nSee [SKILL.md](./SKILL.md) for full usage documentation."
+          fi
+
+          # Write to file (handles multiline safely)
+          printf '%s' "$NOTES" > /tmp/release_notes.md
+
+          # Also prepend a header
+          cat > /tmp/release_body.md << EOF
+          ## eCapture Skill ${TAG}
+
+          A Claude Custom Skill for [eCapture (旁观者)](https://ecapture.cc) — capture SSL/TLS plaintext, shell commands, and database queries on Linux/Android without a CA certificate, powered by eBPF.
+
+          ### What's in this release
+
+          | File | Description |
+          |------|-------------|
+          | \`ecapture-skill-${TAG}.zip\` | Full skill package (zip) — upload to Claude |
+          | \`ecapture-skill-${TAG}.tar.gz\` | Full skill package (tar.gz) |
+          | \`SKILL.md\` | Standalone skill definition file |
+          | \`checksum-${TAG}.txt\` | SHA256 checksums |
+
+          ### How to use
+
+          1. Download \`ecapture-skill-${TAG}.zip\`
+          2. Go to [claude.ai](https://claude.ai) → **Settings** → **Integrations** → **Custom Skills**
+          3. Click **"Add Skill"** and upload the zip file (or \`SKILL.md\` directly)
+
+          ### Platform Requirements
+
+          | Architecture | Minimum Kernel |
+          |---|---|
+          | x86\_64 | 4.18 |
+          | aarch64 | 5.5 |
+
+          > ⚠️ eCapture only runs on **Linux or Android**. Root (\`sudo\`) is required.
+
+          ---
+
+          EOF
+
+          # Append changelog notes if any
+          if [ -s /tmp/release_notes.md ]; then
+            echo "### Changes" >> /tmp/release_body.md
+            cat /tmp/release_notes.md >> /tmp/release_body.md
+          fi
+
+      - name: Build release archives
+        id: build
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Create a clean staging directory named after the skill + version
+          STAGE_DIR="ecapture-skill-${TAG}"
+          mkdir -p "${STAGE_DIR}"
+
+          # Copy all skill files
+          cp -r SKILL.md README.md README-zh_Hans.md assets references scripts "${STAGE_DIR}/"
+
+          # Create zip archive
+          ZIP_NAME="ecapture-skill-${TAG}.zip"
+          zip -r "${ZIP_NAME}" "${STAGE_DIR}/"
+          echo "zip=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+          # Create tar.gz archive
+          TAR_NAME="ecapture-skill-${TAG}.tar.gz"
+          tar -czf "${TAR_NAME}" "${STAGE_DIR}/"
+          echo "tar=${TAR_NAME}" >> "$GITHUB_OUTPUT"
+
+          # Copy standalone SKILL.md with version suffix
+          cp SKILL.md "SKILL-${TAG}.md"
+          echo "skill_md=SKILL-${TAG}.md" >> "$GITHUB_OUTPUT"
+
+          # Generate SHA256 checksums
+          CHECKSUM_FILE="checksum-${TAG}.txt"
+          sha256sum "${ZIP_NAME}" "${TAR_NAME}" "SKILL-${TAG}.md" > "${CHECKSUM_FILE}"
+          echo "checksum=${CHECKSUM_FILE}" >> "$GITHUB_OUTPUT"
+
+          echo "Artifacts:"
+          ls -lh "${ZIP_NAME}" "${TAR_NAME}" "SKILL-${TAG}.md" "${CHECKSUM_FILE}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "eCapture Skill ${{ steps.version.outputs.tag }}"
+          body_path: /tmp/release_body.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          files: |
+            ${{ steps.build.outputs.zip }}
+            ${{ steps.build.outputs.tar }}
+            ${{ steps.build.outputs.skill_md }}
+            ${{ steps.build.outputs.checksum }}
+
