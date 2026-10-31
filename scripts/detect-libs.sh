@@ -1,116 +1,57 @@
 #!/usr/bin/env bash
-# detect-libs.sh
-# Detect SSL/TLS library paths on the current Linux host.
-# Prints discovered paths so the Agent can pass them to ecapture flags.
-# Run on the TARGET Linux host.
-
-set -uo pipefail
-
-echo "=== eCapture Library Detection ==="
-echo ""
-
-# Helper: find a library via ldconfig or locate
-find_lib() {
-  local name="$1"
-  # Try ldconfig cache first (fastest)
-  ldconfig -p 2>/dev/null | grep "$name" | awk '{print $NF}' | head -1
+# List candidates; --pid uses actual process mappings instead of the host cache.
+set -euo pipefail
+[ "$(uname -s)" = Linux ] || { printf 'Run library discovery on the target Linux/Android host.\n' >&2; exit 1; }
+pid=
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != --pid ] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Usage: %s [--pid PID]\n' "$0" >&2; exit 1
+  fi
+  pid=$2
+fi
+show_library() {
+  local path=$1 flag
+  case "${path##*/}" in
+    libssl.so*) flag=--libssl ;;
+    libgnutls.so*) flag=--gnutls ;;
+    libnspr4.so*) flag=--nspr ;;
+    libreadline.so*) flag=--readlineso ;;
+    *) return 0 ;;
+  esac
+  printf '  %s=%q\n' "$flag" "$path"
 }
-
-# 1. OpenSSL libssl
-echo "--- OpenSSL (libssl) ---"
-LIBSSL=$(find_lib "libssl.so")
-if [ -n "$LIBSSL" ]; then
-  echo "  Found: $LIBSSL"
-  echo "  ecapture flag: --libssl=$LIBSSL"
-  # Try to get version
-  OPENSSL_VER=$(openssl version 2>/dev/null || echo "unknown")
-  echo "  Version: $OPENSSL_VER"
+if [ -n "$pid" ]; then
+  [ -r "/proc/$pid/maps" ] || { printf 'Cannot read /proc/%s/maps; check PID/permissions.\n' "$pid" >&2; exit 1; }
+  printf 'Process %s executable: ' "$pid"
+  readlink "/proc/$pid/exe" || true
+  printf 'Mapped library candidates (paths belong to the process mount namespace):\n'
+  while IFS= read -r path; do
+    show_library "$path"
+  done < <(awk '$6 ~ /^\// {print substr($0, index($0, $6))}' "/proc/$pid/maps" | sort -u)
+  printf 'Verify host visibility/inode; container paths may require /proc/%s/root. Deleted mappings need separate investigation.\n' "$pid"
 else
-  echo "  Not found via ldconfig. Try: find /usr/lib /lib -name 'libssl.so*' 2>/dev/null"
-fi
-echo ""
-
-# 2. BoringSSL (Android-style, may appear as libssl.so too)
-echo "--- BoringSSL ---"
-BORINGSSL=$(find_lib "libssl.so" | grep -i boring || true)
-if [ -n "$BORINGSSL" ]; then
-  echo "  Found: $BORINGSSL"
-else
-  echo "  Not detected (BoringSSL typically found on Android systems)"
-fi
-echo ""
-
-# 3. GnuTLS
-echo "--- GnuTLS (libgnutls) ---"
-LIBGNUTLS=$(find_lib "libgnutls.so")
-if [ -n "$LIBGNUTLS" ]; then
-  echo "  Found: $LIBGNUTLS"
-  echo "  ecapture flag: --gnutls=$LIBGNUTLS"
-  GNUTLS_VER=$(gnutls-cli --version 2>/dev/null | head -1 || echo "unknown")
-  echo "  Version: $GNUTLS_VER"
-else
-  echo "  Not found"
-fi
-echo ""
-
-# 4. NSS / NSPR (Firefox)
-echo "--- NSS/NSPR (libnspr4) ---"
-LIBNSPR=$(find_lib "libnspr4.so")
-if [ -n "$LIBNSPR" ]; then
-  echo "  Found: $LIBNSPR"
-  echo "  ecapture flag: --nspr=$LIBNSPR"
-else
-  echo "  Not found (install Firefox to get libnspr4.so)"
-fi
-echo ""
-
-# 5. bash + readline
-echo "--- bash + readline ---"
-BASH_PATH=$(command -v bash 2>/dev/null || echo "")
-if [ -n "$BASH_PATH" ]; then
-  echo "  bash: $BASH_PATH"
-  echo "  ecapture flag: --bash=$BASH_PATH"
-  READLINE=$(ldd "$BASH_PATH" 2>/dev/null | grep readline | awk '{print $3}' | head -1)
-  if [ -n "$READLINE" ]; then
-    echo "  readline: $READLINE"
-    echo "  ecapture flag: --readlineso=$READLINE"
+  printf 'Host library candidates (not proof of which library the target uses):\n'
+  if command -v ldconfig >/dev/null 2>&1; then
+    while IFS= read -r path; do
+      show_library "$path"
+    done < <(ldconfig -p 2>/dev/null | awk '/=>/ {print $NF}' | sort -u)
   fi
-else
-  echo "  bash not found"
+  for path in /apex/com.android.conscrypt/lib64/libssl.so /system/lib64/libssl.so; do
+    [ ! -f "$path" ] || show_library "$path"
+  done
 fi
-echo ""
-
-# 6. zsh
-echo "--- zsh ---"
-ZSH_PATH=$(command -v zsh 2>/dev/null || echo "")
-if [ -n "$ZSH_PATH" ]; then
-  echo "  zsh: $ZSH_PATH"
-  echo "  ecapture flag: --zsh=$ZSH_PATH"
-else
-  echo "  zsh not found"
-fi
-echo ""
-
-# 7. MySQL / MariaDB
-echo "--- MySQL / MariaDB ---"
-for bin in /usr/sbin/mysqld /usr/sbin/mariadbd /usr/libexec/mysqld; do
-  if [ -x "$bin" ]; then
-    echo "  Found: $bin"
-    echo "  ecapture flag: --mysqld=$bin"
-  fi
+printf 'Host executable candidates:\n'
+for name in bash zsh mysqld mariadbd postgres; do
+  path=$(command -v "$name" || true)
+  [ -n "$path" ] || continue
+  flag=$name
+  [ "$name" != mariadbd ] || flag=mysqld
+  printf '  --%s=%q\n' "$flag" "$path"
 done
-echo ""
-
-# 8. PostgreSQL
-echo "--- PostgreSQL ---"
-PG_BIN=$(command -v postgres 2>/dev/null || find /usr/lib/postgresql -name postgres -type f 2>/dev/null | head -1 || echo "")
-if [ -n "$PG_BIN" ]; then
-  echo "  Found: $PG_BIN"
-  echo "  ecapture flag: --postgres=$PG_BIN"
-else
-  echo "  Not found"
-fi
-echo ""
-
-echo "=== Detection complete ==="
-
+for path in /usr/sbin/mysqld /usr/sbin/mariadbd /usr/libexec/mysqld /usr/lib/postgresql/*/bin/postgres; do
+  [ -x "$path" ] || continue
+  flag=mysqld
+  [ "${path##*/}" != postgres ] || flag=postgres
+  printf '  --%s=%q\n' "$flag" "$path"
+done
+printf 'Confirm actual library version/symbols; a system openssl CLI may use another library.\n'

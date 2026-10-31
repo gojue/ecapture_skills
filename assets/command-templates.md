@@ -1,101 +1,76 @@
-# eCapture Command Templates
+# eCapture command templates
 
-## TLS / SSL Capture (OpenSSL · BoringSSL · LibreSSL)
+Replace brace-delimited values with verified, shell-quoted target values before
+running. Commands use v2.9.1 behavior. Resolve the module/namespace/interface
+first; remove optional flags rather than leaving placeholders in a command.
 
-```bash
-# Print plaintext (default)
-sudo ecapture tls
-
-# Save to pcapng file
-sudo ecapture tls -m pcap -i {INTERFACE} -w {OUTPUT_FILE} {BPF_FILTER}
-
-# Export TLS session keys
-sudo ecapture tls -m keylog -k {KEYLOG_FILE}
-
-# Filter by PID
-sudo ecapture tls -p {PID}
-
-# Specify libssl.so explicitly
-sudo ecapture tls --libssl={LIBSSL_PATH}
-
-# Write output to file
-sudo ecapture tls -l {LOG_FILE}
-```
-
-## Go TLS Capture
+## TLS and HTTP
 
 ```bash
-# Print plaintext
-sudo ecapture gotls -e {GO_BINARY_PATH}
+# Hook plaintext from one process; separate operational log.
+sudo ecapture tls -p {PID} --libssl '{LIBSSL_PATH}' \
+  --eventaddr '{TEXT_FILE}' --logaddr '{OPERATIONAL_LOG}'
 
-# Save to pcapng
-sudo ecapture gotls -e {GO_BINARY_PATH} -m pcap -i {INTERFACE} -w {OUTPUT_FILE}
+# Live complete HTTP/1.1 or HTTP/2; optional raw capture copy.
+sudo ecapture tls -m text --text-source pcapng -i '{INTERFACE}' \
+  --eventaddr '{HTTP_FILE}' -w '{PCAPNG_FILE}' '{PACKET_BPF_FILTER}'
 
-# Export TLS keys
-sudo ecapture gotls -e {GO_BINARY_PATH} -m keylog -k {KEYLOG_FILE}
+# Packet capture with embedded TLS keys (no separate -w with --eventaddr).
+sudo ecapture tls -m pcapng -i '{INTERFACE}' \
+  --eventaddr '{PCAPNG_FILE}' '{PACKET_BPF_FILTER}'
+
+# NSS key lines for a separate packet capture (no separate -k).
+sudo ecapture tls -m keylog --eventaddr '{KEYLOG_FILE}'
+
+# Linux cgroup v2 scope; confirm the startup log did not disable the filter.
+sudo ecapture tls --cgroup_path '{CGROUP_V2_DIRECTORY}' --eventaddr '{TEXT_FILE}'
 ```
 
-## GnuTLS Capture
+## GoTLS and GnuTLS
 
 ```bash
-sudo ecapture gnutls
-sudo ecapture gnutls --ssl_version={GNUTLS_VERSION}
-sudo ecapture gnutls -m keylog -k {KEYLOG_FILE}
+sudo ecapture gotls -e '{GO_ELF_PATH}' -p {PID} --eventaddr '{TEXT_FILE}'
+sudo ecapture gotls -e '{GO_ELF_PATH}' -m text --text-source pcapng \
+  -i '{INTERFACE}' --eventaddr '{HTTP_FILE}' '{PACKET_BPF_FILTER}'
+sudo ecapture gotls -e '{GO_ELF_PATH}' -m keylog --eventaddr '{KEYLOG_FILE}'
+sudo ecapture gnutls --gnutls '{GNUTLS_PATH}' --eventaddr '{TEXT_FILE}'
+sudo ecapture gnutls --gnutls '{GNUTLS_PATH}' -m pcapng \
+  -i '{INTERFACE}' --eventaddr '{PCAPNG_FILE}' '{PACKET_BPF_FILTER}'
 ```
 
-## NSS / NSPR (Firefox) Capture
+## NSPR, shell, and SQL
 
 ```bash
-sudo ecapture nspr
-sudo ecapture nspr -p {FIREFOX_PID}
-sudo ecapture nspr -l {LOG_FILE}
+sudo ecapture nspr --nspr '{NSPR_PATH}' -p {PID} --eventaddr '{TEXT_FILE}'
+# Omit --errnumber for general Bash capture (default sentinel 128).
+sudo ecapture bash --bash '{BASH_PATH}' -u {TARGET_UID} --eventaddr '{TEXT_FILE}'
+# Zsh captures input; do not promise exit-code filtering.
+sudo ecapture zsh --zsh '{ZSH_PATH}' -u {TARGET_UID} --eventaddr '{TEXT_FILE}'
+sudo ecapture mysqld --mysqld '{MYSQLD_PATH}' --eventaddr '{TEXT_FILE}'
+sudo ecapture postgres --postgres '{POSTGRES_PATH}' --eventaddr '{TEXT_FILE}'
 ```
 
-## Shell Command Auditing
+## Streaming and bounded remote capture
 
 ```bash
-# All bash commands (all users)
-sudo ecapture bash -e 0
+# Start an appropriate receiver first; raw bytes, not NDJSON.
+sudo ecapture tls --eventaddr 'tcp://{RECEIVER_HOST}:{PORT}'
+sudo ecapture tls --eventaddr 'wss://{RECEIVER_HOST}:{PORT}/events'
+# Typed binary Protobuf live events, additive to the primary artifact.
+sudo ecapture tls --eventaddr '{TEXT_FILE}' --ecaptureq '127.0.0.1:{PORT}'
+# File-backed text/keylog rotation only; preserve the CLI's spelling.
+sudo ecapture tls --eventaddr '{TEXT_FILE}' --eventroratesize 100 --eventroratetime 3600
 
-# All bash commands for a specific UID
-sudo ecapture bash -e 0 -u {UID} -l {LOG_FILE}
-
-# zsh commands
-sudo ecapture zsh -e 0
+# Example SSH flow using known target values; Linux timeout sends SIGINT.
+ssh user@linux-host 'sudo timeout --signal=INT 30s ecapture tls -m pcapng -i eth0 --eventaddr /tmp/traffic.pcapng'
+# Transfer using an account/path with permission to read the sensitive artifact.
+scp user@linux-host:/tmp/traffic.pcapng ./traffic.pcapng
 ```
 
-## Database Query Auditing
+Timeout 124 can be an expected timed stop; inspect probe logs and artifact
+content. For newly created root-owned sensitive files, arrange an authorized
+read/transfer path without making the file world-readable. Do not assume scp
+can read a root-owned 0600 capture.
 
-```bash
-# MySQL / MariaDB
-sudo ecapture mysqld
-sudo ecapture mysqld -m {MYSQLD_PATH} -l {LOG_FILE}
-
-# PostgreSQL
-sudo ecapture postgres
-sudo ecapture postgres -m {POSTGRES_PATH} -l {LOG_FILE}
-```
-
-## Remote Execution via SSH
-
-```bash
-# Run on remote Linux host
-ssh {SSH_USER}@{LINUX_HOST} 'sudo ecapture {MODULE} {FLAGS}'
-
-# SSH tunnel for hot-reload API
-ssh -L 28256:localhost:28256 {SSH_USER}@{LINUX_HOST}
-```
-
-## Real-Time Event Streaming
-
-```bash
-# Push to TCP server
-sudo ecapture tls --eventaddr tcp://{AGENT_HOST}:{PORT}
-
-# Push to WebSocket server
-sudo ecapture tls --eventaddr ws://{AGENT_HOST}:{PORT}/events
-
-# Queue server (agent connects to pull)
-sudo ecapture tls --ecaptureq 0.0.0.0:{PORT}
-```
-
+For HTTP reload use [runtime configuration](../references/runtime-config.md);
+start with `--listen 127.0.0.1:28256` and send the actual JSON schema.
