@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./images/ecapture-skill-logo.png" alt="eCapture logo" width="180" />
+</p>
+
 # eCapture AI Agent Skill
 
 [中文](README-zh_Hans.md) · [eCapture](https://github.com/gojue/ecapture) · [Releases](https://github.com/gojue/ecapture/releases)
